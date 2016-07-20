@@ -9,8 +9,7 @@ module HoneyBee
       if pathname.absolute?
         @path = pathname.cleanpath.to_path
       else
-        raise NoEntryError unless ::File.exist?(path)
-        @path = pathname.realpath.to_path
+        @path = Pathname.new(File.absolute_path(path)).cleanpath.to_path
       end
     end
     
@@ -20,33 +19,90 @@ module HoneyBee
     
     def ancestors_enum
       return enum_for(:ancestors_enum) unless block_given?
-      node = self
-      until node.nil?
-        node = node.parent
-        yield node
+      entry = self
+      loop do
+        entry = entry.parent
+        break if entry.nil?
+        yield entry
       end
     end
     
-    def copy_to(directory)
-      raise NoEntryError unless ::File.exist?(path)
-      raise "Can only copy to a directory." unless directory.is_a?(Directory)
-      new_path = (Pathname.new(directory.path) + Pathname.new(name)).to_path
-      FileUtils.copy(@path, new_path)
-      self.class.new(new_path)
+    def children
+      children_enum.to_a
     end
     
-    alias_method :eql?, :==
+    def children_enum
+      raise NoEntryError unless exist?
+      raise WrongEntryError unless directory?
+      return enum_for(:children_enum) unless block_given?
+      Dir.foreach(@path) do |entry|
+        next if entry == '.' || entry == '..'
+        temp_entry = descendant(entry)
+        yield temp_entry
+      end
+    end
+    
+    def copy_to(entry, new_name = nil)
+      raise NoEntryError unless exist?
+      raise WrongEntryError, "Can only copy into an existing directory." unless entry.directory?
+      new_entry = new_name ? entry.child(new_name) : entry.child(name)
+      binding.pry
+      FileUtils.copy(@path, new_entry.path)
+      new_entry
+    end
+    
+    def descendant(path)
+      raise 'Must pass path of file system entry as a String.' unless path.is_a?(String)
+      Entry.new(::File.join(@path, path))
+    end
+    
+    def descendants(glob_path = nil)
+      raise 'Path of file system entries must be a String.' unless path == nil || path.is_a?(String)
+      descendants_enum(glob_path).to_a
+    end
+    
+    def descendants_enum(glob_path = nil)
+      raise 'Path of file system entries must be a String.' unless path == nil || path.is_a?(String)
+      raise NoEntryError unless exist?
+      raise WrongEntryError unless directory?
+      return enum_for(:descendants_enum, glob_path) unless block_given?
+      if glob_path
+        full_glob_path = ::File.join(@path, glob_path)
+        Pathname.glob(full_glob_path).map(&:to_path).each { |path| yield Entry.new(path) }
+      else
+        children.each do |child|
+          yield child
+          if child.directory?
+            child.descendants.each { |descendant| yield descendant }
+          end
+        end
+      end
+    end
+    
+    def descendant_of?(entry)
+      raise 'Must pass an Entry.' unless entry.is_a?(Entry)
+      ancestors.include?(entry)
+    end
+    
+    def directory?
+      ::File.directory?(@path)
+    end
     
     def exist?
       ::File.exist?(@path)
     end
     
-    def move_to(directory)
-      raise NoEntryError unless ::File.exist?(path)
-      raise "Can only move to a directory." unless directory.is_a?(Directory)
-      new_path = (Pathname.new(directory.path) + Pathname.new(name)).to_path
-      FileUtils.move(@path, new_path)
-      @path = new_path
+    def file?
+      ::File.file?(@path)
+    end
+    
+    def move_to(entry)
+      raise NoEntryError unless exist?
+      raise WrongEntryError, "Can only move into an existing directory." unless entry.directory?
+      new_entry = entry.child(name)
+      binding.pry
+      FileUtils.move(@path, new_entry.path)
+      @path = new_entry.path
       nil
     end
     
@@ -55,27 +111,35 @@ module HoneyBee
     end
     
     def parent
-      directory = Directory.new(Pathname.new(@path).parent.to_path)
-      if directory == self
+      entry = Entry.new(Pathname.new(@path).parent.to_path)
+      if entry == self
         nil
       else
-        directory
+        entry
       end
     end
     
     alias_method :parent=, :move_to
     
+    def relative_path_from(base_entry)
+      raise 'Must pass a base Entry.' unless base_entry.is_a?(Entry)
+      Pathname.new(@path).relative_path_from(Pathname.new(base_entry.path)).to_path
+    end
+    
     def remove
       raise NoEntryError unless exist?
+      binding.pry
       FileUtils.remove_entry(@path)
       nil
     end
     
     def rename(new_name)
+      raise NoEntryError unless exist?
       raise "Name must be a string." unless new_name.is_a?(String)
-      new_path = (Pathname.new(parent.path) + Pathname.new(new_name)).to_path
-      ::File.rename(@path, new_path) if exist?
-      @path = new_path
+      new_entry = parent.child(new_name)
+      binding.pry
+      ::File.rename(@path, new_entry.path)
+      @path = new_entry.path
       nil
     end
     
@@ -93,27 +157,18 @@ module HoneyBee
       end
     end
     
+    def to_s
+      "#<HoneyBee::Entry '#{@path}'>"
+    end
+    
+    alias_method :inspect, :to_s
+    
     def ==(other)
-      raise "Can only compare with other Files and Directories." unless other.respond_to?(:path)
+      raise "Can only compare with other Entries." unless other.respond_to?(:path)
       @path == other.path
     end
     
-    def relative(path)
-      HoneyBee.entry(::File.join(@path, path))
-    end
+    alias_method :eql?, :==
     
-    def relatives(path)
-      glop_path = ::File.join(@path, path)
-      Pathname.glob(glop_path).map(&:to_path).map { |path| HoneyBee.entry(path) }
-    end
-    
-    def relative_path_from(base_directory)
-      Pathname.new(@path).relative_path_from(base_directory)
-    end
-    
-    def descendant_of?(directory)
-      ancestors.include?(directory)
-    end
-  
   end
 end
